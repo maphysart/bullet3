@@ -122,22 +122,18 @@ struct CommonMultiBodyBase : public CommonExampleInterface
 		{
 			case 0:
 				m_solver = new btMultiBodyConstraintSolver;
-				b3Printf("Constraint Solver: Sequential Impulse");
 				break;
 			case 1:
 				mlcp = new btSolveProjectedGaussSeidel();
 				m_solver = new btMultiBodyMLCPConstraintSolver(mlcp);
-				b3Printf("Constraint Solver: MLCP + PGS");
 				break;
 			case 2:
 				mlcp = new btDantzigSolver();
 				m_solver = new btMultiBodyMLCPConstraintSolver(mlcp);
-				b3Printf("Constraint Solver: MLCP + Dantzig");
 				break;
 			case 3:
 				mlcp = new btLemkeSolver();
 				m_solver = new btMultiBodyMLCPConstraintSolver(mlcp);
-				b3Printf("Constraint Solver: MLCP + Lemke");
 				break;
 		}
 
