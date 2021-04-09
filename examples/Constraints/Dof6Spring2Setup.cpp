@@ -535,17 +535,11 @@ void Skeleton::applySpringForce(float deltaTime){
 
 void Skeleton::applyGravityForce(float deltaTime)
 {
-    btVector3 g = btVector3(0, -10, 0);
+    float damp = 0.0; // if damp is set to 0.2 or more, the tail will wind up in horizontal oscillating motion
+    btVector3 g = btVector3(0, -0.2, 0);
     for (int i = 0; i < m_numLinks; ++i) {
-        btVector3 orient = m_multiBody->getLink(i).m_dVector;
-        orient = m_multiBody->localDirToWorld(i, orient);
-        btVector3 torque = btCross(orient, g * m_multiBody->getLink(i).m_mass);
-//        torque *= deltaTime;
-        m_multiBody->addLinkTorque(i, torque);
+        m_multiBody->addLinkForce(i, g * m_multiBody->getLink(i).m_mass / pow(i+1, damp));
     }
-//    for (int i = 0; i < m_numLinks; ++i) {
-//        m_multiBody->addLinkForce(i, g * m_multiBody->getLink(i).m_mass);
-//    }
 }
 
 void Skeleton::applyBaseLinearDragForce(float deltaTime, int m_step, const btVector3& pos)
@@ -677,6 +671,8 @@ void Skeleton::stepSimulation(float deltaTime) {
 
     // p2p
     m_p2p->setPivotInB(pos);
+
+    applyGravityForce(deltaTime);
 
     moveCollider(pos);
 
