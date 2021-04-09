@@ -462,7 +462,7 @@ public:
 		}
 	}
 
-	void applyDeltaVeeMultiDof(const btScalar *delta_vee, btScalar multiplier)
+	virtual void applyDeltaVeeMultiDof(const btScalar *delta_vee, btScalar multiplier)
 	{
 		//for (int dof = 0; dof < 6 + getNumDofs(); ++dof)
 		//	printf("%.4f ", delta_vee[dof]*multiplier);
@@ -747,7 +747,7 @@ private:
 
 	void mulMatrix(btScalar * pA, btScalar * pB, int rowsA, int colsA, int rowsB, int colsB, btScalar *pC) const;
 
-private:
+protected:
 	btMultiBodyLinkCollider *m_baseCollider;  //can be NULL
 	const char *m_baseName;                   //memory needs to be manager by user!
 
