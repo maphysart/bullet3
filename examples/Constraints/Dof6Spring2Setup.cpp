@@ -394,6 +394,7 @@ void Skeleton::initPhysics()
         frameInB.setIdentity();
         m_p2p = new btMultiBodyPoint2Point(pMultiBody, 0, 0, pointInA, pointInB);
         m_p2p->setMaxAppliedImpulse(10);
+        m_p2p->setErp(0.8);
         m_dynamicsWorld->addMultiBodyConstraint(m_p2p);
     }
 
@@ -545,6 +546,8 @@ void Skeleton::applyGravityForce(float deltaTime)
 void Skeleton::applyBaseLinearDragForce(float deltaTime, int m_step, const btVector3& pos)
 {
     btVector3 currBaseVel;
+    float g = 0.2;
+    float damp = 0.0; // if damp is set to 0.2 or more, the tail will wind up in horizontal oscillating motion
 
     if ( m_step == 1 )
         m_prevBaseVel = (pos - m_prevBasePos) / deltaTime;
@@ -552,22 +555,19 @@ void Skeleton::applyBaseLinearDragForce(float deltaTime, int m_step, const btVec
     if ( m_step > 1 ) {
         currBaseVel = (pos - m_prevBasePos) / deltaTime;
         btVector3 currBaseAcc = (currBaseVel - m_prevBaseVel) / deltaTime;
-        for (int i = 0; i < m_numLinks; ++i) {
-            btVector3 orient = m_multiBody->getLink(i).m_dVector;
-            orient = m_multiBody->localDirToWorld(i, orient);
-            btVector3 torque = btCross(orient, -currBaseAcc * m_multiBody->getLink(i).m_mass / (i + 1));
-            // TODO at the beginning, the force is too big. but at the next Cycle, it is small. NEED to check and fix.
-            torque *= m_linearDragEffect;
-            if (torque.length() > MAX_DRAG_FORCE) {
-                printf("drag force %f is too large\n", torque.length());
-                torque = torque.normalized() * MAX_DRAG_FORCE;
-            }
-            // TODO addlink is different from addJointTorqueMultiDof, and the later looks better in animation.
-//        m_multiBody->addLinkTorque(i, torque);
-            for (int d = 0; d < m_multiBody->getLink(i).m_dofCount; d++) {
-                m_multiBody->addJointTorqueMultiDof(i, d, torque[d]);
+
+        if ( currBaseAcc.norm() > 1e-2 ) {
+            btVector3 acc = currBaseAcc.normalized();
+            for (int i = 0; i < m_numLinks; ++i) {
+                btVector3 dir = m_multiBody->getLink(i).m_cachedWorldTransform.getOrigin() - pos;
+                dir.normalize();
+                dir = dir - dir.dot(acc) * acc;
+                dir.normalize();
+                btVector3 force = g * dir * m_multiBody->getLink(i).m_mass / pow(i+1, damp);
+                m_multiBody->addLinkForce(i, force);
             }
         }
+
         m_prevBaseVel = currBaseVel;
     }
 }
@@ -666,13 +666,13 @@ void Skeleton::stepSimulation(float deltaTime) {
 //    m_prevBasePos = trans;
 
     btVector3 pos = m_move.getPos(m_time, deltaTime);
-//    applyBaseLinearDragForce(deltaTime, m_step, pos);
+    applyBaseLinearDragForce(deltaTime, m_step, pos);
     m_prevBasePos = pos;
 
     // p2p
     m_p2p->setPivotInB(pos);
 
-    applyGravityForce(deltaTime);
+//    applyGravityForce(deltaTime);
 
     moveCollider(pos);
 
