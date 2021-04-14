@@ -1,5 +1,6 @@
 #include <math.h>
 #include <limits>
+#include <deque>
 
 #include "Dof6Spring2Setup.h"
 
@@ -77,6 +78,10 @@ btScalar adjustKs(btScalar ks, btScalar mass, btScalar deltaTime)
 /////////////////////////////////////////////////////////////
 #define WIRE_FRAME 0
 
+#define MAX_SIZE 3
+
+#define ACC_ARRAY_SIZE 20
+
 char mfileName[1024];
 
 const btVector3 zeroTransOffset(0.0, 0.0, 0.0);
@@ -109,13 +114,17 @@ public:
                     const btVector3& inertia,  // inertia of base, in base frame; assumed diagonal
                     bool fixedBase,            // whether the base is fixed (true) or can move (false)
                     bool canSleep, bool deprecatedMultiDof = true)
-            : btMultiBody(n_links, mass, inertia, fixedBase, canSleep, deprecatedMultiDof), m_maxOmegaX(100.f)
-    {}
+            : btMultiBody(n_links, mass, inertia, fixedBase, canSleep, deprecatedMultiDof)
+    {
+        m_maxOmega = 100.f;
+        m_maxOmegaX = m_maxOmega;
+    }
 
 
     virtual ~customMultiBody() {}
 
     void setMaxOmegaX(btScalar max) { m_maxOmegaX = max; }
+    void setMaxOmega(btScalar max) { m_maxOmega = m_maxOmegaX = max; }
 
     virtual void applyDeltaVeeMultiDof(const btScalar* delta_vee, btScalar multiplier)
     {
@@ -124,7 +133,13 @@ public:
             m_realBuf[dof] += delta_vee[dof] * multiplier;
             if (dof >= 6 && dof % 3 == 0)
             {
-                btClamp(m_realBuf[dof], -m_maxOmegaX, m_maxOmegaX);
+                if ( dof % 3 == 0 )
+                {
+                    btClamp(m_realBuf[dof], -m_maxOmegaX, m_maxOmegaX);
+                }
+                else {
+                    btClamp(m_realBuf[dof], -m_maxOmega, m_maxOmega);
+                }
             }
             else
                 btClamp(m_realBuf[dof], -m_maxCoordinateVelocity, m_maxCoordinateVelocity);
@@ -133,6 +148,7 @@ public:
 
 protected:
     btScalar m_maxOmegaX;
+    btScalar m_maxOmega;
 };
 
 
@@ -195,9 +211,9 @@ public:
     }
 };
 
-struct lineOscilator
+struct LineOscilator
 {
-    lineOscilator()
+    LineOscilator()
     {
         amp = 2.0f;
         T = 30.0f;
@@ -205,7 +221,7 @@ struct lineOscilator
     }
 
     btVector3 getPos(float time, float deltaTime){
-        btVector3 pos = btVector3(0, 0, cosOffset(amp, T, phase, time));
+        btVector3 pos = btVector3(0, 0, cosOffset(amp, T, phase, time) * exp(-time / (4* T)));
         return pos;
     }
 
@@ -235,7 +251,8 @@ struct CircleOscilator
         {
             clockwise = true;
         }
-        angle += (clockwise ? 1 : -1) * omega * deltaTime;
+        angle += (clockwise ? 1 : -1) * omega * deltaTime * exp(-time / (2 * T));
+//        angle += (clockwise ? 1 : -1) * omega * deltaTime;
         return btVector3(radius * sin(angle), 0, radius * cos(angle));
     }
 
@@ -248,15 +265,13 @@ struct CircleOscilator
 
 struct Skeleton : public CommonMultiBodyBase
 {
-    btMultiBody* m_multiBody;
+    customMultiBody* m_multiBody;
     btRigidBody* m_collider;
 
     int m_solverType;
     btScalar m_time;
     int m_step;
     int m_numLinks;
-    btVector3 m_prevBaseVel;
-    btVector3 m_prevBasePos;
     btAlignedObjectArray<btQuaternion> m_balanceRot;
     std::vector<btScalar> m_Ks;
     gravityGenerator m_g;
@@ -266,6 +281,13 @@ struct Skeleton : public CommonMultiBodyBase
     btMultiBodyPoint2Point* m_p2p;
     btScalar m_radius;
     CircleOscilator m_move;
+    btVector3 m_currVel;
+    btVector3 m_currAcc;
+    std::deque<btVector3> positions;
+    std::deque<btVector3> accs;
+    std::vector<btMultiBodySphericalJointMotor*> motors;
+    bool use_constraint;
+    float m_avgAcc;
 
 public:
     Skeleton(struct GUIHelperInterface* helper);
@@ -283,10 +305,12 @@ public:
     void addColliders(btMultiBody* pMultiBody, btMultiBodyDynamicsWorld* pWorld, const btVector3& baseHalfExtents, const btVector3& linkHalfExtents);
     void moveCollider(const btVector3& pos);
     void applySpringForce(float time, float deltaTime);
-    void applyBaseLinearDragForce(float deltaTime, int m_step, const btVector3& pos, const btVector3& dir);
+    void applyBaseLinearDragForce(const btVector3& dir);
     void applyBaseCentrifugalForce(float deltaTime, int m_step, const btVector3& pos);
     static void OnInternalTickCallback(btDynamicsWorld* world, btScalar timeStep);
     void applyGravityForce(float deltaTime);
+    void getLinearAcc(float deltaTime, int m_step, const btVector3& pos);
+    void limitMaxTwist(float max_angle);
 };
 
 Skeleton::Skeleton(struct GUIHelperInterface* helper)
@@ -296,13 +320,16 @@ Skeleton::Skeleton(struct GUIHelperInterface* helper)
     m_step = 0;
     m_numLinks = 16;
     m_solverType = 0;
-    m_prevBaseVel = btVector3(0.0, 0.0, 0.0);
-    m_prevBasePos = btVector3(0, 0,0);
     m_g.m_gravity = -0.08;
     m_linearDragEffect = btScalar(25.0);
     m_centrifugalDragEffect = btScalar(0.3);
     m_clockwise = true;
     m_radius = 2.0;
+    m_currVel = btVector3(0,0,0);
+    m_currAcc = btVector3(0,0,0);
+    positions.clear();
+    use_constraint = false;
+    m_avgAcc = 0.0f;
 }
 
 Skeleton::~Skeleton()
@@ -353,7 +380,6 @@ void Skeleton::initPhysics()
     }
 
     customMultiBody* pMultiBody = new customMultiBody(m_numLinks, baseMass, baseInertiaDiag, !floating, canSleep);
-    pMultiBody->setMaxOmegaX(100.f);
     //pMultiBody->useRK4Integration(true);
 
     // set base position
@@ -362,7 +388,6 @@ void Skeleton::initPhysics()
     btVector3 basePos = btVector3(0.0, 0.0, m_radius);
     pMultiBody->setBasePos(init_pos);
 
-    m_prevBasePos = init_pos;
     m_multiBody = pMultiBody;
 
     //y-axis assumed up
@@ -400,8 +425,8 @@ void Skeleton::initPhysics()
     if (damping)
     {
         // TODO set linear and angular damp for each joint
-        pMultiBody->setLinearDamping(0.05f);
-        pMultiBody->setAngularDamping(0.5f);
+        pMultiBody->setLinearDamping(0.1f);
+        pMultiBody->setAngularDamping(0.7f);
     }
 
     // init pose
@@ -421,17 +446,23 @@ void Skeleton::initPhysics()
     angle = 0 * SIMD_PI / 180.f;
     for (int i = 0; i < m_numLinks; i++)
     {
-        btQuaternion q(btVector3(1, 0, 0).normalized(), angle);
-        m_balanceRot[i] = q;
-        angle *= angle_damp;
+        if ( i == 0)
+        {
+            angle = 45 * SIMD_PI / 180.f;
+            btQuaternion q(btVector3(1, 0, 0).normalized(), angle);
+            m_balanceRot[i] = q;
+        } else{
+            btQuaternion q(btVector3(1, 0, 0).normalized(), 0);
+            m_balanceRot[i] = q;
+        }
     }
 
     m_Ks.resize(pMultiBody->getNumLinks());
     float ks_damp = 0.2;
-    float ks_init = 0.3;
+    float ks_init = 0.2;
     for (int i = 0; i < m_numLinks; i++)
     {
-        m_Ks[i] = ks_init / pow(i+1, 1);
+        m_Ks[i] = ks_init / pow(i+1, 1.0);
     }
 
     addColliders(pMultiBody, m_dynamicsWorld, baseHalfExtents, linkHalfExtents);
@@ -496,15 +527,21 @@ void Skeleton::initPhysics()
 //            btMultiBodySphericalJointMotor *motor = new btMultiBodySphericalJointMotor(pMultiBody, i, btScalar(10));
 //            motor->setPositionTarget(q, 0.1);
 //            motor->setErp(btScalar(0.1));
-//            pMultiBody->getLink(i).m_userPtr = motor;
-//            m_dynamicsWorld->addMultiBodyConstraint(motor);
 //            motor->finalizeMultiDof();
-//
 //            angle *= damp;
+//            motors.push_back(motor);
 //        }
 //    }
 
     m_dynamicsWorld->setGravity(btVector3(0, -0.0, 0));
+
+    btContactSolverInfo& si = m_dynamicsWorld->getSolverInfo();
+    si.m_numIterations = 10;
+    si.m_globalCfm = 0.05f;
+    si.m_erp2 = 0.1f;
+
+//    m_multiBody->setMaxCoordinateVelocity(2.0);
+    m_multiBody->setMaxOmega(1.0f);
 }
 
 void Skeleton::addColliders(btMultiBody* pMultiBody, btMultiBodyDynamicsWorld* pWorld, const btVector3& baseHalfExtents, const btVector3& linkHalfExtents)
@@ -564,17 +601,10 @@ void Skeleton::moveCollider(const btVector3& pos){
 }
 
 void Skeleton::applySpringForce(float time, float deltaTime){
-    float max_force = 0.5;
+    float max_force = 0.2;
     std::vector<btScalar> temp;
 //    float max_time = 0.5;
-    temp = m_Ks;
-//    if ( time < max_time)
-//    {
-//        for ( int i = 0; i < m_Ks.size(); i++ )
-//        {
-//            temp[i] = m_Ks[i] * ( time / max_time );
-//        }
-//    }
+//    temp = m_Ks;
 
     for (int i = 0; i < m_multiBody->getNumLinks(); ++i) {
         btQuaternion currentQuat(m_multiBody->getJointPosMultiDof(i)[0],
@@ -586,14 +616,16 @@ void Skeleton::applySpringForce(float time, float deltaTime){
         btGeneric6DofSpring2Constraint::matrixToEulerXYZ(btMatrix3x3(relRot), angleDiff);
         btVector3 spring;
         for (int d = 0; d < m_multiBody->getLink(i).m_dofCount; d++) {
-            spring[d] = temp[i] * angleDiff[d];
+            spring[d] = m_Ks[i] * angleDiff[d];
         }
-        if ( spring.norm() > 1e-3 && spring.norm() > max_force )
+        if ( spring.norm() > max_force )
         {
             spring = spring.normalized() * max_force;
         }
-//        spring[1] = 0.0f;
+//        m_multiBody->addLinkForce(i, btVector3(0, 0, -1) * m_Ks[i]);
         m_multiBody->addLinkTorque(i, spring);
+//        spring[1] = 0.0f;
+//        m_multiBody->addJointTorqueMultiDof(i, spring);
 //        m_multiBody->addJointTorqueMultiDof(i, &spring[0]);
 //        for (int d = 0; d < m_multiBody->getLink(i).m_dofCount; d++) {
 //            m_multiBody->addJointTorqueMultiDof(i, d, spring[d]);
@@ -610,32 +642,84 @@ void Skeleton::applyGravityForce(float deltaTime)
     }
 }
 
-void Skeleton::applyBaseLinearDragForce(float deltaTime, int m_step, const btVector3& pos, const btVector3& dir)
+void Skeleton::getLinearAcc(float deltaTime, int m_step, const btVector3& pos)
+{
+    if ( positions.size() == MAX_SIZE)
+    {
+        positions.pop_front();
+    }
+    positions.push_back(pos);
+
+    if ( positions.size() > 1 ) {
+        int length = positions.size();
+        m_currVel = (positions[length - 1] - positions[length - 2]) / deltaTime;
+    }
+
+    if ( positions.size() > 2 ) {
+        int length = positions.size();
+        m_currAcc = (positions[length - 1] + positions[length - 3] - 2 * positions[length - 2]) / deltaTime / deltaTime;
+
+        if ( accs.size() == ACC_ARRAY_SIZE)
+        {
+            accs.pop_front();
+        }
+        accs.push_back(m_currAcc);
+    }
+    printf("acc %f\n", m_currAcc.norm());
+    printf("vel %f\n", m_currVel.norm());
+}
+
+void Skeleton::applyBaseLinearDragForce(const btVector3& dir)
 {
     btVector3 currBaseVel;
     float scaling = 5;
     float damp = 1.0; // if damp is set to 0.2 or more, the tail will wind up in horizontal oscillating motion
 
-    if ( m_step == 1 )
-        m_prevBaseVel = (pos - m_prevBasePos) / deltaTime;
-
-    if ( m_step > 1 ) {
-        currBaseVel = (pos - m_prevBasePos) / deltaTime;
-        btVector3 currBaseAcc = (currBaseVel - m_prevBaseVel) / deltaTime;
-
-        if ( currBaseAcc.norm() > 1e-2 ) {
-            btVector3 g = dir * currBaseAcc.norm() * scaling;
-            for (int i = 0; i < m_numLinks; ++i) {
-                m_multiBody->addLinkForce(i, g * m_multiBody->getLink(i).m_mass / pow(i+1, damp));
-            }
+    // TODO replace to avg acc
+    if ( m_avgAcc > 1e-2 ) {
+        btVector3 g = dir * m_avgAcc * scaling;
+        for (int i = 0; i < m_numLinks; ++i) {
+            m_multiBody->addLinkForce(i, g * m_multiBody->getLink(i).m_mass / pow(i+1, damp));
         }
-
-        m_prevBaseVel = currBaseVel;
     }
 }
 
 void Skeleton::applyBaseCentrifugalForce(float deltaTime, int m_step, const btVector3& pos)
 {
+}
+
+void Skeleton::limitMaxTwist(float max_angle)
+{
+    for (int i = 1; i < m_multiBody->getNumLinks(); ++i) {
+        btQuaternion q(m_multiBody->getJointPosMultiDof(i)[0],
+                       m_multiBody->getJointPosMultiDof(i)[1],
+                       m_multiBody->getJointPosMultiDof(i)[2],
+                       m_multiBody->getJointPosMultiDof(i)[3]);
+
+        bool needed = false;
+        float a = q.getAngle();
+        if ( a > max_angle ) {
+            a = max_angle;
+            needed = true;
+        }
+        if ( a < -max_angle) {
+            a = -max_angle;
+            needed = true;
+        }
+        if (needed) {
+
+            btQuaternion newq;
+            if ( fabs(sin(q.getAngle() / 2 )) > 1e-4 )
+            {
+                newq[3] = cos(a / 2);
+                float ratio = sin(q.getAngle() / 2) / sin(q.getAngle() / 2);
+                newq[0] = q[0] * ratio;
+                newq[1] = q[1] * ratio;
+                newq[2] = q[2] * ratio;
+            }
+            m_multiBody->setJointPosMultiDof(i, &newq[0]);
+        }
+    }
 }
 
 void Skeleton::OnInternalTickCallback(btDynamicsWorld* world, btScalar timeStep)
@@ -718,23 +802,83 @@ void Skeleton::stepSimulation(float deltaTime) {
 //    m_dynamicsWorld->setGravity(btVector3(0, g, 0));
 
 //    // calculate and apply the impulse, the damp use the difference between prev pos and curr pos
-    applySpringForce(m_time, deltaTime);
+//    applySpringForce(m_time, deltaTime);
+    printf("step: %d\n", m_step);
 
-    btVector3 pos = m_move.getPos(m_time, deltaTime);
+//    btVector3 basePos = m_move.getPos(m_time, deltaTime);
+    btVector3 basePos = m_move.getPos(m_time, deltaTime);
+
+    getLinearAcc(deltaTime, m_step, basePos);
+
+    if ( accs.size() == ACC_ARRAY_SIZE ) {
+        float sum = 0.0f;
+        for ( int i = 0; i < accs.size(); i++ )
+            sum += accs[i].norm();
+        m_avgAcc = sum / ACC_ARRAY_SIZE;
+    }
+
+    /*
+     * try to combine two constraint methods, when base is not accelerated, we use spring force,
+     * if the base acc is big, use btMultiBodySphericalJointMotor, but the problem is that
+     * the kp setPositionTarget(q, kp) in btMultiBodySphericalJointMotor does not work even set
+     * to 0.
+     */
+//    if ( accs.size() == ACC_ARRAY_SIZE )
+//    {
+//        float avg_acc = 0.0f;
+//        // if average acc in several frames is less than thresh hold, use drag force to simulate
+//        for ( int i = 0; i < accs.size(); i++ )
+//            avg_acc += accs[i].norm();
+//        avg_acc /= ACC_ARRAY_SIZE;
+//        if ( avg_acc <= 0.01 )
+//        {
+//            if (use_constraint)
+//            {
+//                for ( int i = 0; i < motors.size(); i++ )
+//                {
+//                    m_dynamicsWorld->removeMultiBodyConstraint(motors[i]);
+//                    delete motors[i];
+//                }
+//                motors.clear();
+//                use_constraint = false;
+//            }
+//            applySpringForce(m_time, deltaTime);
+//        }
+//        else {
+//            {
+//                if ( !use_constraint ){
+//                    btScalar angle = 45 * SIMD_PI / 180.f;
+//                    float damp = 0.0;
+//                    for (int i = 0; i < m_multiBody->getNumLinks(); i++) {
+//                        btQuaternion q(btVector3(1, 0, 0).normalized(), angle);
+//                        btMultiBodySphericalJointMotor *motor = new btMultiBodySphericalJointMotor(m_multiBody, i, btScalar(0.1));
+//                        motor->setPositionTarget(q, 0.0);
+//                        motor->setErp(btScalar(0.1));
+//                        m_multiBody->getLink(i).m_userPtr = motor;
+//                        m_dynamicsWorld->addMultiBodyConstraint(motor);
+//                        motor->finalizeMultiDof();
+//                        angle *= damp;
+//                        motors.push_back(motor);
+//                    }
+//                    use_constraint = true;
+//                }
+//            }
+//        }
+//    }
+
+
     btVector3 dir = btVector3(0, -1, 0);
 
-    applyBaseLinearDragForce(deltaTime, m_step, pos, dir);
+    applyBaseLinearDragForce(dir);
 
-    applyBaseCentrifugalForce(deltaTime, m_step, pos);
+//    applyBaseCentrifugalForce(deltaTime, m_step, basePos);
 
-    m_prevBasePos = pos;
+    applySpringForce(m_time, deltaTime);
 
     // p2p
-    m_p2p->setPivotInB(pos);
+    m_p2p->setPivotInB(basePos);
 
-//    applyGravityForce(deltaTime);
-
-    moveCollider(pos);
+    moveCollider(basePos);
 
     // capture the frames
 //    {
@@ -752,44 +896,14 @@ void Skeleton::stepSimulation(float deltaTime) {
     }
 
     btScalar max_angle = 70 * SIMD_PI / 180.f;
-    for (int i = 1; i < m_multiBody->getNumLinks(); ++i) {
-        btQuaternion q(m_multiBody->getJointPosMultiDof(i)[0],
-                                 m_multiBody->getJointPosMultiDof(i)[1],
-                                 m_multiBody->getJointPosMultiDof(i)[2],
-                                 m_multiBody->getJointPosMultiDof(i)[3]);
-
-        bool needed = false;
-        float a = q.getAngle();
-        if ( a > max_angle ) {
-            a = max_angle;
-            needed = true;
-        }
-        if ( a < -max_angle) {
-            a = -max_angle;
-            needed = true;
-        }
-        if (needed) {
-
-            btQuaternion newq;
-            if ( fabs(sin(q.getAngle() / 2 )) > 1e-4 )
-            {
-
-                newq[3] = cos(a / 2);
-                float ratio = sin(q.getAngle() / 2) / sin(q.getAngle() / 2);
-                newq[0] = q[0] * ratio;
-                newq[1] = q[1] * ratio;
-                newq[2] = q[2] * ratio;
-            }
-            m_multiBody->setJointPosMultiDof(i, &newq[0]);
-        }
-    }
+    limitMaxTwist(max_angle);
 
     m_time += deltaTime;
     m_step += 1;
 
-    if ( m_step == 594 )
+    if ( m_step == 121 )
     {
-        printf("%d\n", m_step);
+        printf("step\n");
     }
 }
 
