@@ -2,6 +2,8 @@
 #include <limits>
 #include <deque>
 #include <tuple>
+#include <mutex>
+#include <set>
 
 #include "Dof6Spring2Setup.h"
 
@@ -99,6 +101,47 @@ static btScalar radius(0.05);
 #define MAX_DRAG_FORCE SIMD_INFINITY
 #define MAX_SPRING_FORCE 0.5f
 
+class GlobalState
+{
+public:
+    GlobalState(GlobalState& other) = delete;
+
+    void operator=(const GlobalState&) = delete;
+
+    static GlobalState* GetInstance()
+    {
+        if (_instance == nullptr) {
+            _instance = new GlobalState();
+        }
+        return _instance;
+    }
+
+    void insertCollisionEvent(int link)
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        collisionLinks.insert(link);
+    }
+
+    std::set<int> getCollisionEvent()
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        return collisionLinks;
+    }
+
+    void clearCollisionEvent()
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        collisionLinks.clear();
+    }
+
+private:
+    GlobalState() {}
+    static GlobalState* _instance;
+    std::mutex m_mtx;
+    std::set<int> collisionLinks;
+};
+
+GlobalState* GlobalState::_instance = nullptr;
 
 ATTRIBUTE_ALIGNED16(class)
 customMultiBody : public btMultiBody
@@ -238,7 +281,7 @@ struct CircleOscilator
     {
         T = 30.0f;
         omega = SIMD_2_PI / T;
-        angle = 0.0f;
+        angle = SIMD_PI / 4.0;
         clockwise = true;
         radius = 2;
     }
@@ -292,6 +335,7 @@ struct Skeleton : public CommonMultiBodyBase
     std::vector<btMultiBodySphericalJointMotor*> motors;
     bool use_constraint;
     float m_avgAcc;
+    GlobalState* m_state;
 
 public:
     Skeleton(struct GUIHelperInterface* helper);
@@ -334,6 +378,7 @@ Skeleton::Skeleton(struct GUIHelperInterface* helper)
     positions.clear();
     use_constraint = false;
     m_avgAcc = 0.0f;
+    m_state = GlobalState::GetInstance();
 }
 
 Skeleton::~Skeleton()
@@ -775,8 +820,8 @@ void Skeleton::getLinearAcc(float deltaTime, int m_step, const btVector3& pos)
         }
         accs.push_back(m_currAcc);
     }
-    printf("acc %f\n", m_currAcc.norm());
-    printf("vel %f\n", m_currVel.norm());
+//    printf("acc %f\n", m_currAcc.norm());
+//    printf("vel %f\n", m_currVel.norm());
 }
 
 void Skeleton::applyBaseLinearDragForce(const btVector3& dir)
@@ -798,8 +843,19 @@ void Skeleton::applyBaseCentrifugalForce(float deltaTime, const btVector3& pos, 
 {
     btVector3 dir = pos - btVector3(0,0,0);
 
+    std::set<int> links = m_state->getCollisionEvent();
+    int min_link = m_multiBody->getNumLinks();
+    for ( auto iter = links.begin(); iter != links.end(); iter++ )
+    {
+        if (min_link > *iter)
+            min_link = *iter;
+    }
+    min_link += 1;
+    if (min_link >= m_multiBody->getNumLinks())
+        min_link = m_multiBody->getNumLinks();
+
     const btScalar scaling = 1.0;
-    for ( int i = 0; i < m_multiBody->getNumLinks(); i++ )
+    for ( int i = 0; i < min_link; i++ )
     {
         btVector3 c = m_multiBody->getLink(i).m_cachedWorldTransform.getOrigin();
         btScalar r = sqrt(c.x() * c.x() + c.z() * c.z());
@@ -886,6 +942,15 @@ void Skeleton::OnInternalTickCallback(btDynamicsWorld* world, btScalar timeStep)
             // when there is no collision, set gravity to go downside
             has_collision = true;
 
+            const btCollisionObject* bone;
+            if (obA->getBroadphaseHandle()->m_collisionFilterGroup & BONE_BODY)
+                bone = obA;
+            else
+                bone = obB;
+
+            btMultiBodyLinkCollider* link = (btMultiBodyLinkCollider*)btMultiBodyLinkCollider::upcast(bone);
+            demo->m_state->insertCollisionEvent(link->m_link);
+
             btManifoldPoint& pt = contactManifold->getContactPoint(j);
             printf("step : %d, collision impulse: %f\n", demo->m_step, pt.getAppliedImpulse());
 
@@ -961,6 +1026,8 @@ void Skeleton::stepSimulation(float deltaTime) {
 //        this->m_guiHelper->getAppInterface()->dumpNextFrameToPng(mfileName);
 //    }
 
+    m_state->clearCollisionEvent();
+
     // step and update positions
     int substeps = 2;
     btScalar  fixedTimeStep = deltaTime / substeps;
@@ -969,8 +1036,15 @@ void Skeleton::stepSimulation(float deltaTime) {
         m_dynamicsWorld->debugDrawWorld();
     }
 
-    btScalar max_angle = 90 * SIMD_PI / 180.f;
-    limitMaxTwist(max_angle);
+    // set limit will cause instability when collisions happens
+//    btScalar max_angle = 120 * SIMD_PI / 180.f;
+//    limitMaxTwist(max_angle);
+
+    std::set<int> collisionLinks = m_state->getCollisionEvent();
+    for ( auto iter = collisionLinks.begin(); iter != collisionLinks.end(); iter++ )
+    {
+        printf("collision link : %d\n", *iter);
+    }
 
     m_time += deltaTime;
     m_step += 1;
