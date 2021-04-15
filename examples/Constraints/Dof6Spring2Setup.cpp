@@ -1,6 +1,7 @@
 #include <math.h>
 #include <limits>
 #include <deque>
+#include <tuple>
 
 #include "Dof6Spring2Setup.h"
 
@@ -78,7 +79,7 @@ btScalar adjustKs(btScalar ks, btScalar mass, btScalar deltaTime)
 /////////////////////////////////////////////////////////////
 #define WIRE_FRAME 0
 
-#define MAX_SIZE 3
+#define POS_ARRAY_SIZE 10
 
 #define ACC_ARRAY_SIZE 20
 
@@ -220,9 +221,9 @@ struct LineOscilator
         phase =  0;
     }
 
-    btVector3 getPos(float time, float deltaTime){
+    std::tuple<btVector3, btScalar> getPos(float time, float deltaTime){
         btVector3 pos = btVector3(0, 0, cosOffset(amp, T, phase, time) * exp(-time / (4* T)));
-        return pos;
+        return std::make_tuple(pos, 0);
     }
 
     btScalar amp;
@@ -242,7 +243,7 @@ struct CircleOscilator
         radius = 2;
     }
 
-    btVector3 getPos(float time, float deltaTime){
+    std::tuple<btVector3, btScalar> getPos(float time, float deltaTime){
         if ( angle > (SIMD_PI / 4.0) )
         {
             clockwise = false;
@@ -251,9 +252,11 @@ struct CircleOscilator
         {
             clockwise = true;
         }
-        angle += (clockwise ? 1 : -1) * omega * deltaTime * exp(-time / (2 * T));
-//        angle += (clockwise ? 1 : -1) * omega * deltaTime;
-        return btVector3(radius * sin(angle), 0, radius * cos(angle));
+        btScalar currOmega = omega;
+        currOmega = omega * deltaTime * exp(-time / (10 * T));
+        angle += (clockwise ? 1 : -1) * currOmega;
+//        angle += (clockwise ? 1 : -1) * currOmega * deltaTime;
+        return std::make_tuple(btVector3(radius * sin(angle), 0, radius * cos(angle)), currOmega);
     }
 
     btScalar T;
@@ -267,6 +270,7 @@ struct Skeleton : public CommonMultiBodyBase
 {
     customMultiBody* m_multiBody;
     btRigidBody* m_collider;
+    btRigidBody* m_marker;
 
     int m_solverType;
     btScalar m_time;
@@ -304,10 +308,10 @@ public:
     }
     void addColliders(btMultiBody* pMultiBody, btMultiBodyDynamicsWorld* pWorld, const btVector3& baseHalfExtents, const btVector3& linkHalfExtents);
     void moveCollider(const btVector3& pos);
+    void moveMarker(const btVector3& pos);
     void applyBaseLinearDragForce(const btVector3& dir);
-    void applyBaseCentrifugalForce(float deltaTime, int m_step, const btVector3& pos);
+    void applyBaseCentrifugalForce(float deltaTime, const btVector3& pos, float omega);
     static void OnInternalTickCallback(btDynamicsWorld* world, btScalar timeStep);
-    void applyGravityForce(float deltaTime);
     void getLinearAcc(float deltaTime, int m_step, const btVector3& pos);
     void limitMaxTwist(float max_angle);
     void applySpringForce();
@@ -361,7 +365,7 @@ void Skeleton::initPhysics()
     const bool canSleep = false;
     const bool selfCollide = false;
 
-    btVector3 init_pos = m_move.getPos(0, 0);
+    auto [init_pos, omega] = m_move.getPos(0, 0);
 
     /////////////////////////////////////////////////////////////////
     // construct the skeleton
@@ -528,7 +532,7 @@ void Skeleton::initPhysics()
 
 
     /////////////////////////////////////////////////////////////////
-    // construct the box
+    // construct the marker
     /////////////////////////////////////////////////////////////////
     {
         btCollisionShape* colShape = new btSphereShape(btScalar(0.1));
@@ -550,15 +554,49 @@ void Skeleton::initPhysics()
         //using motionstate is recommended, it provides interpolation capabilities, and only synchronizes 'active' objects
         btDefaultMotionState* myMotionState = new btDefaultMotionState(startTransform);
         btRigidBody::btRigidBodyConstructionInfo rbInfo(mass, myMotionState, colShape, localInertia);
-        m_collider = new btRigidBody(rbInfo);
-        m_collider->setRestitution(0.0);
-        m_dynamicsWorld->addRigidBody(m_collider, BONE_BODY, NOTHING);
-        int id = m_collider->getCompanionId();
+        m_marker = new btRigidBody(rbInfo);
+        m_marker->setRestitution(0.0);
+        m_dynamicsWorld->addRigidBody(m_marker, BONE_BODY, NOTHING);
 
         if (!WIRE_FRAME)
         {
             m_guiHelper->createCollisionShapeGraphicsObject(colShape);
             btVector4 color(1, 0, 0, 1);
+            m_guiHelper->createCollisionObjectGraphicsObject(dynamic_cast<btCollisionObject*>(m_marker), color);
+        }
+    }
+
+    /////////////////////////////////////////////////////////////////
+    // construct the collider
+    /////////////////////////////////////////////////////////////////
+    {
+        btCollisionShape* colShape = new btCapsuleShape(btScalar(0.3), btScalar(0.9));
+
+        /// Create Dynamic Objects
+        btTransform startTransform;
+        startTransform.setIdentity();
+        startTransform.setOrigin(btVector3(0.0, 0.0, 0.0));
+
+        btScalar mass(0.f);
+
+        //rigidbody is dynamic if and only if mass is non zero, otherwise static
+        bool isDynamic = (mass != 0.f);
+
+        btVector3 localInertia(0, 0, 0);
+        if (isDynamic)
+            colShape->calculateLocalInertia(mass, localInertia);
+
+        //using motionstate is recommended, it provides interpolation capabilities, and only synchronizes 'active' objects
+        btDefaultMotionState* myMotionState = new btDefaultMotionState(startTransform);
+        btRigidBody::btRigidBodyConstructionInfo rbInfo(mass, myMotionState, colShape, localInertia);
+        m_collider = new btRigidBody(rbInfo);
+        m_collider->setRestitution(0.0);
+        m_dynamicsWorld->addRigidBody(m_collider, TARGET_BODY, BONE_BODY);
+
+        if (!WIRE_FRAME)
+        {
+            m_guiHelper->createCollisionShapeGraphicsObject(colShape);
+            btVector4 color(1, 0, 1, 1);
             m_guiHelper->createCollisionObjectGraphicsObject(dynamic_cast<btCollisionObject*>(m_collider), color);
         }
     }
@@ -693,25 +731,30 @@ void Skeleton::addColliders(btMultiBody* pMultiBody, btMultiBodyDynamicsWorld* p
 }
 
 void Skeleton::moveCollider(const btVector3& pos){
-    btTransform tr;
-    tr.setIdentity();
-    tr.setOrigin(pos);
-    tr.setRotation(btQuaternion(0.0, 0.0, 0.0, 1.0));
-    m_collider->setWorldTransform(tr);
+    if ( m_collider )
+    {
+        btTransform tr;
+        tr.setIdentity();
+        tr.setOrigin(pos);
+        tr.setRotation(btQuaternion(0.0, 0.0, 0.0, 1.0));
+        m_collider->setWorldTransform(tr);
+    }
 }
 
-void Skeleton::applyGravityForce(float deltaTime)
-{
-    float damp = 1.0; // if damp is set to 0.2 or more, the tail will wind up in horizontal oscillating motion
-    btVector3 g = btVector3(0, -0.2, 0);
-    for (int i = 0; i < m_numLinks; ++i) {
-        m_multiBody->addLinkForce(i, g * m_multiBody->getLink(i).m_mass / pow(i+1, damp));
+void Skeleton::moveMarker(const btVector3& pos){
+    if ( m_marker )
+    {
+        btTransform tr;
+        tr.setIdentity();
+        tr.setOrigin(pos);
+        tr.setRotation(btQuaternion(0.0, 0.0, 0.0, 1.0));
+        m_marker->setWorldTransform(tr);
     }
 }
 
 void Skeleton::getLinearAcc(float deltaTime, int m_step, const btVector3& pos)
 {
-    if ( positions.size() == MAX_SIZE)
+    if ( positions.size() == POS_ARRAY_SIZE)
     {
         positions.pop_front();
     }
@@ -751,8 +794,23 @@ void Skeleton::applyBaseLinearDragForce(const btVector3& dir)
     }
 }
 
-void Skeleton::applyBaseCentrifugalForce(float deltaTime, int m_step, const btVector3& pos)
+void Skeleton::applyBaseCentrifugalForce(float deltaTime, const btVector3& pos, float omega)
 {
+    btVector3 dir = pos - btVector3(0,0,0);
+
+    const btScalar scaling = 1.0;
+    for ( int i = 0; i < m_multiBody->getNumLinks(); i++ )
+    {
+        btVector3 c = m_multiBody->getLink(i).m_cachedWorldTransform.getOrigin();
+        btScalar r = sqrt(c.x() * c.x() + c.z() * c.z());
+        btVector3 force = m_multiBody->getLinkMass(i) * omega * omega * r * dir.normalized() * (1 / pow(i + 1, 0.6));
+        m_multiBody->addLinkForce(i, force);
+
+        if ( WIRE_FRAME ) {
+            m_guiHelper->getRenderInterface()->drawLine(c, c + force, btVector4(1, 1, 0, 0),
+                                                        btScalar(2));
+        }
+    }
 }
 
 void Skeleton::limitMaxTwist(float max_angle)
@@ -870,7 +928,7 @@ void Skeleton::stepSimulation(float deltaTime) {
 
     printf("step: %d\n", m_step);
 
-    btVector3 basePos = m_move.getPos(m_time, deltaTime);
+    auto [ basePos, omega ] = m_move.getPos(m_time, deltaTime);
 
     getLinearAcc(deltaTime, m_step, basePos);
 
@@ -885,14 +943,16 @@ void Skeleton::stepSimulation(float deltaTime) {
 
     applyBaseLinearDragForce(dir);
 
-//    applyBaseCentrifugalForce(deltaTime, m_step, basePos);
+    applyBaseCentrifugalForce(deltaTime, basePos, omega);
 
     applySpringForce();
 
     // p2p
     m_p2p->setPivotInB(basePos);
 
-    moveCollider(basePos);
+    moveMarker(basePos);
+
+    moveCollider(btVector3(0, -2, 2));
 
     // capture the frames
 //    {
