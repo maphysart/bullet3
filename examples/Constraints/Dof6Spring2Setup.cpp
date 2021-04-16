@@ -447,10 +447,17 @@ void Skeleton::initPhysics()
     for (int i = 0; i < m_numLinks; ++i)
     {
         float linkMass = 1.f;
+        // increase the first link mass does not work.
+//        if (i == 0)
+//        {
+//            linkMass = 10.0f;
+//        }
+        // decrease the link mass does not work either.
+//        linkMass = pow( btScalar(m_numLinks - i) / m_numLinks, 0.5);
         btVector3 linkInertiaDiag(0.f, 0.f, 0.f);
         btCollisionShape* shape = 0;
         {
-            shape = new btBoxShape(linkHalfExtents);
+            shape = new btSphereShape(linkHalfExtents[1]);
         }
         shape->calculateLocalInertia(linkMass, linkInertiaDiag);
         delete shape;
@@ -655,7 +662,7 @@ void Skeleton::initPhysics()
         frameInA.setIdentity();
         frameInB.setIdentity();
         m_p2p = new btMultiBodyPoint2Point(pMultiBody, 0, 0, pointInA, pointInB);
-        m_p2p->setMaxAppliedImpulse(10);
+        m_p2p->setMaxAppliedImpulse(20);
         m_p2p->setErp(0.8);
         m_dynamicsWorld->addMultiBodyConstraint(m_p2p);
     }
@@ -682,8 +689,11 @@ void Skeleton::initPhysics()
     si.m_globalCfm = 0.05f;
     si.m_erp2 = 0.1f;
 
+    // setMaxCoordinateVelocity will also limit the base vel and rot. so we use setMaxOmega
 //    m_multiBody->setMaxCoordinateVelocity(2.0);
     m_multiBody->setMaxOmega(2.0f);
+    // setMaxOmegaX will cause instability problem.
+//    m_multiBody->setMaxOmegaX(0.5);
 }
 
 void Skeleton::applySpringForce()
