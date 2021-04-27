@@ -142,6 +142,11 @@ btMultiBody::btMultiBody(int n_links,
 
 	clearConstraintForces();
 	clearForcesAndTorques();
+
+    m_linearDampK1.resize(n_links, m_linearDamping);
+    m_linearDampK2.resize(n_links, m_linearDamping);
+    m_angularDampK1.resize(n_links, m_angularDamping);
+    m_angularDampK2.resize(n_links, m_angularDamping);
 }
 
 btMultiBody::~btMultiBody()
@@ -927,8 +932,8 @@ void btMultiBody::computeAccelerationsArticulatedBodyAlgorithmMultiDof(btScalar 
 			//
 			//adding damping terms (only)
 			btScalar linDampMult = 1., angDampMult = 1.;
-			zeroAccSpatFrc[i + 1].addVector(angDampMult * m_links[i].m_inertiaLocal * spatVel[i + 1].getAngular() * (DAMPING_K1_ANGULAR + DAMPING_K2_ANGULAR * spatVel[i + 1].getAngular().safeNorm()),
-											linDampMult * m_links[i].m_mass * spatVel[i + 1].getLinear() * (DAMPING_K1_LINEAR + DAMPING_K2_LINEAR * spatVel[i + 1].getLinear().safeNorm()));
+			zeroAccSpatFrc[i + 1].addVector(angDampMult * m_links[i].m_inertiaLocal * spatVel[i + 1].getAngular() * (m_angularDampK1[i] + m_angularDampK2[i] * spatVel[i + 1].getAngular().safeNorm()),
+											linDampMult * m_links[i].m_mass * spatVel[i + 1].getLinear() * (m_linearDampK1[i] + m_linearDampK2[i] * spatVel[i + 1].getLinear().safeNorm()));
 			//p += vhat x Ihat vhat - done in a simpler way
 			if (m_useGyroTerm)
 				zeroAccSpatFrc[i + 1].addAngular(spatVel[i + 1].getAngular().cross(m_links[i].m_inertiaLocal * spatVel[i + 1].getAngular()));

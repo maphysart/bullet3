@@ -462,7 +462,7 @@ public:
 		}
 	}
 
-	void applyDeltaVeeMultiDof(const btScalar *delta_vee, btScalar multiplier)
+	virtual void applyDeltaVeeMultiDof(const btScalar *delta_vee, btScalar multiplier)
 	{
 		//for (int dof = 0; dof < 6 + getNumDofs(); ++dof)
 		//	printf("%.4f ", delta_vee[dof]*multiplier);
@@ -590,6 +590,10 @@ public:
 	void setLinearDamping(btScalar damp)
 	{
 		m_linearDamping = damp;
+        for ( int i = 0; i < m_linearDampK1.size(); i++ )
+            m_linearDampK1[i] = damp;
+        for ( int i = 0; i < m_linearDampK2.size(); i++ )
+            m_linearDampK2[i] = damp;
 	}
 	btScalar getAngularDamping() const
 	{
@@ -598,6 +602,10 @@ public:
 	void setAngularDamping(btScalar damp)
 	{
 		m_angularDamping = damp;
+        for ( int i = 0; i < m_angularDampK1.size(); i++ )
+            m_angularDampK1[i] = damp;
+        for ( int i = 0; i < m_angularDampK2.size(); i++ )
+            m_angularDampK2[i] = damp;
 	}
 
 	bool getUseGyroTerm() const
@@ -726,7 +734,12 @@ public:
 
 	bool isLinkAndAllAncestorsKinematic(const int i) const;
 
-private:
+    void setLinearDampingK1(const btAlignedObjectArray<btScalar>& damps) { m_linearDampK1 = damps; }
+    void setLinearDampingK2(const btAlignedObjectArray<btScalar>& damps) { m_linearDampK2 = damps; }
+    void setAngularDampingK1(const btAlignedObjectArray<btScalar>& damps) { m_angularDampK1 = damps; }
+    void setAngularDampingK2(const btAlignedObjectArray<btScalar>& damps) { m_angularDampK2 = damps; }
+
+protected:
 	btMultiBody(const btMultiBody &);     // not implemented
 	void operator=(const btMultiBody &);  // not implemented
 
@@ -747,7 +760,7 @@ private:
 
 	void mulMatrix(btScalar * pA, btScalar * pB, int rowsA, int colsA, int rowsB, int colsB, btScalar *pC) const;
 
-private:
+protected:
 	btMultiBodyLinkCollider *m_baseCollider;  //can be NULL
 	const char *m_baseName;                   //memory needs to be manager by user!
 
@@ -826,6 +839,11 @@ private:
 
   //If enabled, calculate the velocity based on kinematic transform changes. Currently only implemented for the base.
 	bool m_kinematic_calculate_velocity;
+
+    btAlignedObjectArray<btScalar> m_linearDampK1;
+    btAlignedObjectArray<btScalar> m_linearDampK2;
+    btAlignedObjectArray<btScalar> m_angularDampK1;
+    btAlignedObjectArray<btScalar> m_angularDampK2;
 };
 
 struct btMultiBodyLinkDoubleData
