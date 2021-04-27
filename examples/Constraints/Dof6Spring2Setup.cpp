@@ -195,7 +195,7 @@ Skeleton::Skeleton(struct GUIHelperInterface* helper)
         : CommonMultiBodyBase(helper)
 {
     m_time = btScalar(0.0);
-    m_step = 0;
+    m_step = 1;
     m_numLinks = 8;
     m_solverType = 0;
     m_prevBaseVel = btVector3(0.0, 0.0, 0.0);
