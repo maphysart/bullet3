@@ -424,7 +424,7 @@ void Skeleton::initPhysics()
     /////////////////////////////////////////////////////////////////
     // construct the skeleton
     /////////////////////////////////////////////////////////////////
-    btVector3 linkHalfExtents(1, 0.05, 0.01);
+    btVector3 linkHalfExtents(1, 0.05 / 2.0, 0.01 / 2.0);
     btVector3 baseHalfExtents(0.0, 0.0, 0.0);
 
     btVector3 baseInertiaDiag(0.f, 0.f, 0.f);
@@ -450,9 +450,6 @@ void Skeleton::initPhysics()
     pMultiBody->setBasePos(init_pos);
 
     m_multiBody = pMultiBody;
-
-    //y-axis assumed up
-    btVector3 currentPivotToCurrentCom(0, -linkHalfExtents[1], 0);
 
 //    const float joint_lengths[6] = {0.08, 0.08, 0.08, 0.08, 0.08, 0.08};
     for (int i = 0; i < m_numLinks; ++i)
@@ -482,7 +479,8 @@ void Skeleton::initPhysics()
         if (linkInertiaDiag.z() > inertia_max)
             inertia_max = linkInertiaDiag.z();
         linkInertiaDiag = btVector3(inertia_max, inertia_max, inertia_max);
-
+		printf("joint: %d linkInertiaDiag: %f, %f, %f\n", i, linkInertiaDiag.x(), linkInertiaDiag.y(), linkInertiaDiag.z());
+        
         delete shape;
 
         btVector3 temp;
@@ -515,8 +513,8 @@ void Skeleton::initPhysics()
     pMultiBody->setUseGyroTerm(gyro);
     if (damping)
     {
-        btScalar linearDamp = 0.2f;
-        btScalar angularDamp = 0.8f;
+        btScalar linearDamp = 0.7f;
+        btScalar angularDamp = 1.5f;
 
         // TODO set linear and angular damp for each joint
         pMultiBody->setLinearDamping(linearDamp);
@@ -774,14 +772,12 @@ void Skeleton::applySpringForce()
                          m_multiBody->getJointPosMultiDof(i)[3]);
 
         btVector3 c = m_multiBody->getLink(i).m_cachedWorldTransform.getOrigin();
+        // cause joint_dir is a unit vector, so after localDirToWorld it does not need normalization.
         btVector3 dir = m_multiBody->localDirToWorld(i, joint_dir);
         btVector3 origin = c + (-dir) * joint_lengths[i] * 0.5;
 
-
         btQuaternion balanceQ = m_balanceRot[i];
         btVector3 balanceP = quatRotate(prevQ * balanceQ, joint_dir * joint_lengths[i]) * 0.5 + origin;
-
-        dir.normalize();
 
         float angle = acos((balanceP-origin).normalized().dot(dir));
         btVector3 dist2balance = balanceP - c - (balanceP - c).dot(dir) * dir;
@@ -826,7 +822,7 @@ void Skeleton::addColliders(btMultiBody* pMultiBody, btMultiBodyDynamicsWorld* p
         btScalar quat[4] = {-world_to_local[i + 1].x(), -world_to_local[i + 1].y(), -world_to_local[i + 1].z(), world_to_local[i + 1].w()};
 
 
-        btCollisionShape* shape = new btBoxShape(btVector3(joint_lengths[i] / 2.0f, 0.05, 0.01));
+        btCollisionShape* shape = new btBoxShape(btVector3(joint_lengths[i] / 2.0f, 0.05 / 2.0, 0.01 / 2.0));
         btMultiBodyLinkCollider* col = new btMultiBodyLinkCollider(pMultiBody, i);
         col->setCollisionShape(shape);
 
@@ -1097,11 +1093,11 @@ void Skeleton::stepSimulation(float deltaTime) {
 //    moveCollider(btVector3(0, -2, 2));
 
     // capture the frames
-    {
-        const char* gPngFileName = "multibody";
-        sprintf(mfileName, "%s_%d.png", gPngFileName, m_step);
-        this->m_guiHelper->getAppInterface()->dumpNextFrameToPng(mfileName);
-    }
+    //{
+    //    const char* gPngFileName = "multibody";
+    //    sprintf(mfileName, "%s_%d.png", gPngFileName, m_step);
+    //    this->m_guiHelper->getAppInterface()->dumpNextFrameToPng(mfileName);
+    //}
 
 //    m_state->clearCollisionEvent();
 
@@ -1126,7 +1122,7 @@ void Skeleton::stepSimulation(float deltaTime) {
     m_time += deltaTime;
     m_step += 1;
 
-    if ( m_step == 121 )
+    if ( m_step == 10 )
     {
         printf("step\n");
     }
