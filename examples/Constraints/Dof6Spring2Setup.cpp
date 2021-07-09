@@ -5,6 +5,8 @@
 #include <mutex>
 #include <set>
 #include <list>
+#include <deque>
+#include <numeric>
 
 #include "Dof6Spring2Setup.h"
 
@@ -176,137 +178,76 @@ private:
 class pdDamp : public dampingFunc
 {
 public:
-	pdDamp(btScalar s, btScalar p = 0.5, btScalar i = 0.2, btScalar d = 0.8) 
-	{
-		m_scaling = s;
-		P = p;
-		I = i;
-		D = d;
-		reset();
-	}
-	virtual ~pdDamp() {}
-	void setPID(btScalar p, btScalar i, btScalar d)
-	{
-		P = p; I = i; D = d;
-	}
-	void setMaxIOutput(btScalar maximum)
-	{
-		m_maxIOutput = maximum;
-	}
-	void setMaxError(btScalar maximum)
-	{
-		m_maxError = maximum;
-	}
-	void setOutputLimits(btScalar minimum, btScalar maximum)
-	{
-		if (maximum < minimum) return;
-		m_maxOutput = maximum;
-		m_minOutput = minimum;
-
-		// Ensure the bounds of the I term are within the bounds of the allowable output swing
-		if (m_maxIOutput > (maximum - minimum))
-		{
-			setMaxIOutput(maximum - minimum);
-		}
-	}
-	void setScaling(btScalar s) { m_scaling = s; }
-	void setOutputFilter(btScalar s) {
-		m_outputFilter = s;
-	}
-	// TODO need to call reset after each simulation
-	void reset() {
-		m_maxIOutput = 0;
-		m_maxError = 0;
-		m_errorSum = 0;
-		m_maxOutput = 0;
-		m_minOutput = 0;
-		m_lastError = 0;
-		m_firstRun = true;
-		m_lastOutput = 0;
-		m_outputFilter = 0;	
-	}
+	pdDamp(double dt, double max, double Kp, double Kd, double Ki, double e) 
+		: _dt(dt),
+		  _max(max),
+		  _Kp(Kp),
+		  _Kd(Kd),
+		  _Ki(Ki),
+		  _maxError(e),
+		  _pre_error(0),
+		  _integral(0),
+		  _seqsize(5),
+		  _isfirst(true)
+	{}
 
 	virtual btScalar getChange(btScalar curr, btScalar target) { return getChange(target - curr); }
-	virtual btScalar getChange(btScalar diff) {
-		btScalar output;
-		btScalar Poutput;
-		btScalar Ioutput;
-		btScalar Doutput;
+	virtual btScalar getChange(btScalar error) {
+		// Proportional term
+		double Pout = _Kp * error;
 
-		//Do the simple parts of the calculations
-		btScalar error = diff;
-
-		//Calculate P term
-		Poutput = P * error;
-
-		if (m_firstRun)
+		// Integral term
+		_integral = std::accumulate(_seqs.begin(), _seqs.end(), decltype(_seqs)::value_type(0));
+		double Iout = _Ki * (_integral * _dt);
+		if (_seqs.size() == _seqsize)
 		{
-			m_lastError = diff;
-			m_lastOutput = Poutput;
-			m_firstRun = false;
+			_seqs.pop_front();
 		}
+		_seqs.push_back(error);
 
-		Doutput = D * (diff - m_lastError);
-		m_lastError = diff;
-
-		Ioutput = I * m_errorSum;
-		if (m_maxIOutput != 0)
+		// Derivative term
+		double Dout;
+		if (_isfirst)
 		{
-			Ioutput = clamp(Ioutput, -m_maxIOutput, m_maxIOutput);
-		}
-
-		output = Poutput + Ioutput + Doutput;
-
-		if (!bounded(output, m_minOutput, m_maxOutput))
-		{
-			m_errorSum = error;
-		}
-		else if (m_maxIOutput != 0)
-		{
-			m_errorSum = clamp(m_errorSum + error, -m_maxError, m_maxError);
+			_isfirst = false;
+			Dout = 0;
 		}
 		else
 		{
-			m_errorSum += error;
+			double derivative = (error - _pre_error) / _dt;
+			Dout = _Kd * derivative;
+			if (Dout > _maxError)
+				Dout = _maxError;
+			else if (Dout < -_maxError)
+				Dout = _maxError;
 		}
+		_pre_error = error;
 
-		//Restrict output to our specified output
-		output = clamp(output, m_minOutput, m_maxOutput);
-		output = m_lastOutput * m_outputFilter + output * (1 - m_outputFilter);
-		m_lastOutput = output;
-		return output / SIMD_PI * m_scaling * diff;
+		// Calculate total output
+		double output = Pout + Iout + Dout;
+
+		// Restrict to max/min
+		if (output > _max)
+			output = _max;
+		else if (output < -_max)
+			output = _max;
+
+		return output;
 	}
 
 private:
-	double clamp(btScalar value, btScalar min, btScalar max)
-	{
-		if (value > max) {
-			return max;
-		}
-		if (value < min) {
-			return min;
-		}
-		return value;
-	}
-
-	bool bounded(btScalar value, btScalar min, btScalar max)
-	{
-		return (min < value) && (value < max);
-	}
-
-	btScalar P;
-	btScalar I;
-	btScalar D;
-	btScalar m_maxIOutput;
-	btScalar m_maxError;
-	btScalar m_errorSum;
-	btScalar m_maxOutput;
-	btScalar m_minOutput;
-	btScalar m_lastError;
-	btScalar m_lastOutput;
-	btScalar m_outputFilter;
-	btScalar m_scaling;
-	bool m_firstRun;
+	double _dt;
+	double _max;
+	double _min;
+	double _Kp;
+	double _Kd;
+	double _Ki;
+	double _pre_error;
+	double _integral;
+	double _maxError;
+	std::deque<double> _seqs;
+	int _seqsize;
+	bool _isfirst;
 };
 
 /////////////////////////////////////////////////////////////
@@ -403,6 +344,7 @@ public:
 		m_tailBalanceRot = btQuaternion(0, 0, 0, 1);
 		m_fbRadialTorque = btVector3(0, 0, 0);
 		m_fbXaxisTorque = btVector3(0, 0, 0); 
+		m_firstspringcalc = true;
     }
 
     // for multi branch
@@ -493,6 +435,9 @@ public:
 	btVector3 m_fbRadialTorque;
 	btVector3 m_fbXaxisTorque;
 	btAlignedObjectArray<btQuaternion> m_balanceRot;
+	std::vector<btVector3> m_rtdirs;
+	std::vector<int> m_signs;
+	bool m_firstspringcalc;
 
 protected:
     btScalar m_maxOmegaX;
@@ -677,7 +622,7 @@ Skeleton::Skeleton(struct GUIHelperInterface* helper)
 {
     m_time = btScalar(0.0);
     m_step = 1;
-    m_numLinks = 16;
+    m_numLinks = 5;
 	m_numLinks1 = 3;
 	m_numLinks2 = 4;
     m_solverType = 0;
@@ -843,26 +788,29 @@ void Skeleton::initPhysics()
         // init pose
 		for (int i = 0; i < pMultiBody->getNumLinks(); i++)
 		{
-		    if (i == 0) {
-		        btQuaternion q(btVector3(0, 1, 0).normalized(), -30 * SIMD_PI / 180.f);
+			if (i == 0)
+			{
+				btQuaternion q(btVector3(0, 0, 1).normalized(), -86 * SIMD_PI / 180.f);
 				pMultiBody->setJointPosMultiDof(i, q);
-		    } else {
-				btQuaternion q(btVector3(0, 1, 0).normalized(), 0 * SIMD_PI / 180.f);
+			}
+			else
+			{
+				btQuaternion q(btVector3(0, 0, 1).normalized(), 0 * SIMD_PI / 180.f);
 				pMultiBody->setJointPosMultiDof(i, q);
-		    }
+			}
 		}
 		// init balance
 		pMultiBody->m_balanceRot.resize(pMultiBody->getNumLinks());
 		for (int i = 0; i < pMultiBody->getNumLinks(); i++)
 		{
-			if (i == 6)
+			if (i == 0)
 			{
-				btQuaternion q(btVector3(0, 1, 0).normalized(), 0 * SIMD_PI / 180.f);
+				btQuaternion q(btVector3(0, 0, 1).normalized(), -90 * SIMD_PI / 180.f);
 				pMultiBody->m_balanceRot[i] = q;
 			}
 			else
 			{
-				btQuaternion q(btVector3(0, 1, 0).normalized(), 0 * SIMD_PI / 180.f);
+				btQuaternion q(btVector3(0, 0, 1).normalized(), 0 * SIMD_PI / 180.f);
 				pMultiBody->m_balanceRot[i] = q;
 			}
 		}
@@ -885,7 +833,7 @@ void Skeleton::initPhysics()
 		m_Ks.resize(pMultiBody->getNumLinks());
 		for (int i = 0; i < m_numLinks; i++)
 		{
-			m_Ks[i] = 3.5f;
+			m_Ks[i] = 1.0f;
 		}
 
 		addColliders(pMultiBody, m_dynamicsWorld, joint_lengths);
@@ -1229,37 +1177,37 @@ void Skeleton::initPhysics()
     /////////////////////////////////////////////////////////////////
     // construct the marker
     /////////////////////////////////////////////////////////////////
-    {
-		btCollisionShape* colShape = new btSphereShape(btScalar(0.02 * LENGTH_RATIO));
+  //  {
+		//btCollisionShape* colShape = new btSphereShape(btScalar(0.02 * LENGTH_RATIO));
 
-        /// Create Dynamic Objects
-        btTransform startTransform;
-        startTransform.setIdentity();
-		startTransform.setOrigin(m_multiBody->m_tailPos);
+  //      /// Create Dynamic Objects
+  //      btTransform startTransform;
+  //      startTransform.setIdentity();
+		//startTransform.setOrigin(m_multiBody->m_tailPos);
 
-        btScalar mass(0.f);
+  //      btScalar mass(0.f);
 
-        //rigidbody is dynamic if and only if mass is non zero, otherwise static
-        bool isDynamic = (mass != 0.f);
+  //      //rigidbody is dynamic if and only if mass is non zero, otherwise static
+  //      bool isDynamic = (mass != 0.f);
 
-        btVector3 localInertia(0, 0, 0);
-        if (isDynamic)
-            colShape->calculateLocalInertia(mass, localInertia);
+  //      btVector3 localInertia(0, 0, 0);
+  //      if (isDynamic)
+  //          colShape->calculateLocalInertia(mass, localInertia);
 
-        //using motionstate is recommended, it provides interpolation capabilities, and only synchronizes 'active' objects
-        btDefaultMotionState* myMotionState = new btDefaultMotionState(startTransform);
-        btRigidBody::btRigidBodyConstructionInfo rbInfo(mass, myMotionState, colShape, localInertia);
-        m_marker = new btRigidBody(rbInfo);
-        m_marker->setRestitution(0.0);
-        m_dynamicsWorld->addRigidBody(m_marker, NOTHING, NOTHING);
+  //      //using motionstate is recommended, it provides interpolation capabilities, and only synchronizes 'active' objects
+  //      btDefaultMotionState* myMotionState = new btDefaultMotionState(startTransform);
+  //      btRigidBody::btRigidBodyConstructionInfo rbInfo(mass, myMotionState, colShape, localInertia);
+  //      m_marker = new btRigidBody(rbInfo);
+  //      m_marker->setRestitution(0.0);
+  //      m_dynamicsWorld->addRigidBody(m_marker, NOTHING, NOTHING);
 
-        if (!WIRE_FRAME)
-        {
-            m_guiHelper->createCollisionShapeGraphicsObject(colShape);
-            btVector4 color(1, 0, 0, 1);
-            m_guiHelper->createCollisionObjectGraphicsObject(dynamic_cast<btCollisionObject*>(m_marker), color);
-        }
-    }
+  //      if (!WIRE_FRAME)
+  //      {
+  //          m_guiHelper->createCollisionShapeGraphicsObject(colShape);
+  //          btVector4 color(1, 0, 0, 1);
+  //          m_guiHelper->createCollisionObjectGraphicsObject(dynamic_cast<btCollisionObject*>(m_marker), color);
+  //      }
+  //  }
 
     ///////////////////////////////////////////////////////////////////
     //// construct the marker
@@ -1378,6 +1326,7 @@ void Skeleton::applySpringForce(customMultiBody* mb)
 
     // forwards
 	btVector3 last_c(0, 0, 0);
+	
     for (int i = 0; i < mb->getNumLinks(); ++i)
     {
 		btVector3 c = mb->getLink(i).m_cachedWorldTransform.getOrigin();
@@ -1396,6 +1345,7 @@ void Skeleton::applySpringForce(customMultiBody* mb)
             btQuaternion currentQuat(mb->getJointPosMultiDof(i)[0], mb->getJointPosMultiDof(i)[1], mb->getJointPosMultiDof(i)[2],
 							mb->getJointPosMultiDof(i)[3]);
             btVector3 angleDiff;
+			// TODO remove i == 0
             btQuaternion cq = (i==0 ? btQuaternion(0,0,0,1) : prevXQ) * currentQuat;
 			btQuaternion tq = prevXQ * balanceQ;
 			btQuaternion middle = cq.slerp(tq, 0.5);
@@ -1406,24 +1356,9 @@ void Skeleton::applySpringForce(customMultiBody* mb)
             if (fabs(angle) > 1 * SIMD_PI / 180.f)
 			{
 				XaxisTorqueDirs[i] = -dir;
+				//dampingFunc* pDampFunc = static_cast<dampingFunc*>(mb->getLink(i).m_collider->getUserPointer());
+				//btScalar strength = pDampFunc->getChange(angle);
 				torque = XaxisTorqueDirs[i] * m_Ks[i] * (joint_lengths[i] * 0.5) * angle;
-                
-				//btMatrix3x3 Rt = btMatrix3x3(cq);
-				//btMatrix3x3 Ibody;
-				//btVector3 inertia = mb->getLink(i).m_inertiaLocal;
-				//Ibody.setValue(inertia.x(), 0, 0,
-				//			   0, inertia.y(), 0,
-				//			   0, 0, inertia.z());
-				//btMatrix3x3 Iinv = Rt * Ibody.inverse() * Rt.transpose();
-				//btVector3 Ivx = Iinv * btVector3(1, 0, 0);
-				//btScalar Ix = Ivx.x();
-				//btScalar kw = 0.006;
-				//btScalar phi = angle / SIMD_PI * 2.0;
-				//btScalar t = exp(-phi * phi);
-				//btScalar scaling = 5.0;
-				//btScalar ratio = scaling * kw * exp(-btSqrt(kw * Ix) * t);
-
-				//btScalar ratio = pow(fabs(angleDiff.x() / SIMD_PI), 1) * 100;
 				torque *= 5;
 
 				if (torque.safeNorm() > max_torque)
@@ -1446,35 +1381,103 @@ void Skeleton::applySpringForce(customMultiBody* mb)
         {
 			btVector3 balanceP = quatRotate(prevQ * balanceQ, joint_dir * joint_lengths[i]) * 0.5 + origin;
 			btScalar angle = btAcos((balanceP - origin).normalized().dot(dir));
-			if (angle > 1 * SIMD_PI / 180.f)
+			if (angle > SIMD_PI / 6)
 			{
-				RadialTorqueDirs[i] = dir.cross((balanceP - origin).normalized());
+				angle = SIMD_PI / 6;
+			}
+			btScalar weight = 0.85;
+			angle *= weight;
+			//if (angle > 1 * SIMD_PI / 180.f)
+			//{
+			
+			btVector3 rtdir = dir.cross((balanceP - origin));
+			if (!rtdir.fuzzyZero())
+			{
+				rtdir.normalize();
+				//if (rtdir.z() < 0)
+				//{
+				//	printf("\n");
+				//}
+				if (!mb->m_firstspringcalc)
+				{
+					if (btIsNegative(mb->m_rtdirs[i].dot(rtdir)))
+					{
+						mb->m_signs[i] = -mb->m_signs[i];
+					}
+					if (rtdir.length() > 1e-7)
+					{
+						mb->m_rtdirs[i] = rtdir;
+					}
+					angle *= mb->m_signs[i] * angle;
+				}
+				RadialTorqueDirs[i] = rtdir;
 
-			 	dampingFunc* pDampFunc = static_cast<dampingFunc*>(mb->getLink(i).m_collider->getUserPointer());
+				dampingFunc* pDampFunc = static_cast<dampingFunc*>(mb->getLink(i).m_collider->getUserPointer());
 				btScalar strength = pDampFunc->getChange(angle);
-				//printf("joint %d, strength %f\n", i, strength);
+				int brake = 1;
+				if (btIsNegative(strength * angle))
+				{
+					brake = -1;
+				}
+				//btScalar strength = 1.96;
+				printf("joint %d: angle %f, strength %f\n", i, angle, strength);
 
-				torque = RadialTorqueDirs[i] * m_Ks[i] * (joint_lengths[i] * 0.5) * strength;
+				btScalar ml = 0.0;
+				for (int j = i; j < mb->getNumLinks(); j++)
+				{
+					ml += (j - i) + 0.5;
+				}
+				torque = RadialTorqueDirs[i] * m_Ks[i] * brake * fabs(strength) * sin(fabs(angle)) * (joint_lengths[i] * ml) * 20;
+				/*if (brake < 0)
+				{
+					printf("joint %d: brake\n", i);
+					torque = btVector3(0, 0, 0);
+				}
+				else
+				{
+					printf("joint %d: continue\n", i);
+				}*/
 
-                // limit the max torque
+				// limit the max torque
 				if (torque.safeNorm() > max_torque)
 				{
 					torque *= max_torque / torque.safeNorm();
 				}
 				mb->addLinkTorque(i, torque);
+
+				//btVector3 rf = rtdir.cross(dir) * power * sin(angle);
+				//mb->addLinkForce(i, rf);
+				//btVector3 lf = dir * power * cos(angle);
+				//mb->addLinkForce(i, lf);
+
 				fbRadialTorques[i] += -torque;
-			}
-			if (WIRE_FRAME)
-			{
-				if (!torque.fuzzyZero())
+
+				if (WIRE_FRAME)
 				{
-					//m_guiHelper->getRenderInterface()->drawLine(c, c + torque.safeNormalize() * 0.05, btVector4(0, 1, 0, 1), btScalar(2));
-					//m_guiHelper->getRenderInterface()->drawPoint(balanceP, btVector4(0, 0, 1, 1), btScalar(5));
-				}  
+					if (!torque.fuzzyZero())
+					{
+						//m_guiHelper->getRenderInterface()->drawLine(c, c + lf.safeNormalize() * 0.05, btVector4(0, 1, 0, 1), btScalar(2));
+						m_guiHelper->getRenderInterface()->drawPoint(balanceP, btVector4(0, 0, 1, 1), btScalar(5));
+					}
+				}
 			}
+			//}
+			
 			prevQ = prevQ * balanceQ;
 		}
     }
+
+	if (mb->m_firstspringcalc)
+	{
+		mb->m_rtdirs.resize(mb->getNumLinks());
+		mb->m_signs.resize(mb->getNumLinks());
+		for (size_t i = 0; i < mb->getNumLinks(); i++)
+		{
+			mb->m_rtdirs[i] = RadialTorqueDirs[i];
+			mb->m_signs[i] = 1;
+		}
+		mb->m_firstspringcalc = false;
+	}
 
     // backwards
 	std::vector<customMultiBody*> childs = mb->getChilds();
@@ -1484,20 +1487,19 @@ void Skeleton::applySpringForce(customMultiBody* mb)
 	{
 		tailXaxisTorque += childs[i]->m_fbXaxisTorque;
 	}
-
 	for (int i = mb->getNumLinks() - 1; i >= 0; --i)
 	{
 		if (i == mb->getNumLinks() - 1)
 		{
 			btVector3 fb = tailXaxisTorque * reduce_factor;
 			fb = fb.dot(XaxisTorqueDirs[i]) * XaxisTorqueDirs[i];
-			mb->addLinkTorque(i, fb);
+			//mb->addLinkTorque(i, fb);
 		}
 		else
 		{
 			btVector3 fb = fbXaxisTorques[i + 1] * reduce_factor;
 			fb = fb.dot(XaxisTorqueDirs[i]) * XaxisTorqueDirs[i];
-			mb->addLinkTorque(i, fb);
+			//mb->addLinkTorque(i, fb);
 		}
 	}
 
@@ -1514,13 +1516,13 @@ void Skeleton::applySpringForce(customMultiBody* mb)
 		{
 			btVector3 fb = tailRadialTorque * reduce_factor;
 			fb = fb.dot(RadialTorqueDirs[i]) * RadialTorqueDirs[i];
-			mb->addLinkTorque(i, fb);
+			//mb->addLinkTorque(i, fb);
 		}
 		else
 		{
 			btVector3 fb = fbRadialTorques[i + 1] * reduce_factor;
 			fb = fb.dot(RadialTorqueDirs[i]) * RadialTorqueDirs[i];
-			mb->addLinkTorque(i, fb);
+			//mb->addLinkTorque(i, fb);
         }
 	}
     
@@ -1584,9 +1586,9 @@ void Skeleton::addColliders(customMultiBody* pMultiBody, btMultiBodyDynamicsWorl
 		//damp->setMaxError(SIMD_PI * 1.0);
 		//damp->setOutputFilter(0.2);
 
-		linearDamp* damp = new linearDamp(5.0);
+		//linearDamp* damp = new linearDamp(5.0);
 
-		//powerDamp* damp = new powerDamp(10.0, 2.0);
+		pdDamp* damp = new pdDamp(1.0, 3.14, 0.4, 30, 0.2, 0.2);
 
 		col->setUserPointer(static_cast<void*>(damp));
 
@@ -1886,8 +1888,8 @@ void Skeleton::stepSimulation(float deltaTime) {
 
     m_time += deltaTime;
     m_step += 1;
-
-    if (m_step % 20 == 0)
+	printf("step %d\n", m_step);
+    if (m_step == 28)
     {
         printf("step %d\n", m_step);
     }
